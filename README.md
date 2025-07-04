@@ -146,6 +146,8 @@ Contributions to this project are welcome! If you'd like to contribute, please f
 
 This project’s PPO implementation is based on the [CleanRL](https://github.com/vwxyzjn/cleanrl) library.
 
+The work of P.K. and B.L. has been supported by the Polish National Science Centre through Sonata grant (2022/47/D/ST2/02058).
+
 ## Citation
 ```
 @misc{shehper2024makesmathproblemshard,
