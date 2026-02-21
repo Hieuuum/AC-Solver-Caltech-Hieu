@@ -4,3 +4,8 @@ dist/
 *.txt
 *.pt
 ac_solver/agents/checkpoints/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.eggs/
