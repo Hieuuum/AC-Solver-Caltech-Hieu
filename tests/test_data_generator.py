@@ -1,5 +1,8 @@
 """Tests for the transformer dataset generation pipeline and tokenizer."""
 
+import json
+import os
+
 import numpy as np
 import pytest
 
@@ -8,7 +11,11 @@ from ac_solver.transformer.data_generator import (
     apply_random_ac_moves,
     generate_dataset_for_presentation,
     get_word_lengths,
+    load_progress,
+    merge_shards,
     resize_presentation_np,
+    save_progress,
+    save_shard,
 )
 from ac_solver.transformer.tokenizer import (
     TOKEN_EOS,
@@ -313,3 +320,153 @@ class TestTokenizer:
         tokens = presentation_to_tokens(pres)
         recovered = tokens_to_presentation(tokens, max_relator_length=18)
         np.testing.assert_array_equal(pres, recovered)
+
+
+# --- Incremental saving tests ---
+
+
+class TestSaveAndLoadShard:
+    def test_save_shard_creates_files(self, tmp_path):
+        """save_shard writes .npy files in a shards/ subdirectory."""
+        lmax = 32
+        p0 = [-1, 2, 1, -2, -2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+              -1, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+        config = {"n_phases": 2, "n_chains": 2, "n_moves": 10, "lmax": lmax, "seed": 42}
+
+        results = [generate_dataset_for_presentation((0, p0, config))]
+        save_shard(0, results, str(tmp_path), lmax)
+
+        shard_dir = tmp_path / "shards"
+        assert (shard_dir / "shard_0000_presentations.npy").exists()
+        assert (shard_dir / "shard_0000_metadata.npy").exists()
+
+    def test_shard_round_trip(self, tmp_path):
+        """Saved shard data matches original results."""
+        lmax = 32
+        p0 = [-1, 2, 1, -2, -2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+              -1, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+        config = {"n_phases": 3, "n_chains": 2, "n_moves": 10, "lmax": lmax, "seed": 42}
+
+        pres, meta = generate_dataset_for_presentation((0, p0, config))
+        results = [(pres, meta)]
+        save_shard(0, results, str(tmp_path), lmax)
+
+        shard_dir = tmp_path / "shards"
+        loaded_pres = np.load(shard_dir / "shard_0000_presentations.npy")
+        loaded_meta = np.load(shard_dir / "shard_0000_metadata.npy")
+
+        np.testing.assert_array_equal(loaded_pres, pres)
+        np.testing.assert_array_equal(loaded_meta, meta)
+
+    def test_shard_multiple_results(self, tmp_path):
+        """Shard correctly concatenates results from multiple presentations."""
+        lmax = 32
+        p0 = [-1, 2, 1, -2, -2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+              -1, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+        config = {"n_phases": 2, "n_chains": 2, "n_moves": 10, "lmax": lmax, "seed": 42}
+
+        result0 = generate_dataset_for_presentation((0, p0, config))
+        result1 = generate_dataset_for_presentation((1, p0, config))
+        results = [result0, result1]
+
+        save_shard(0, results, str(tmp_path), lmax)
+
+        shard_dir = tmp_path / "shards"
+        loaded_pres = np.load(shard_dir / "shard_0000_presentations.npy")
+
+        expected_rows = len(result0[0]) + len(result1[0])
+        assert loaded_pres.shape[0] == expected_rows
+        assert loaded_pres.shape[1] == 2 * lmax
+
+
+class TestProgressTracking:
+    def test_load_progress_empty(self, tmp_path):
+        """load_progress returns defaults when no file exists."""
+        progress = load_progress(str(tmp_path))
+        assert progress["completed_shards"] == []
+        assert progress["total_elapsed"] == 0.0
+
+    def test_save_and_load_progress(self, tmp_path):
+        """save_progress writes data that load_progress reads back."""
+        config = {"n_phases": 2, "n_chains": 2, "n_moves": 10, "lmax": 32, "seed": 42}
+        save_progress(str(tmp_path), [0, 2, 5], config, 123.4)
+
+        progress = load_progress(str(tmp_path))
+        assert progress["completed_shards"] == [0, 2, 5]
+        assert progress["total_elapsed"] == 123.4
+        assert progress["config"] == config
+
+    def test_progress_shards_are_sorted(self, tmp_path):
+        """Completed shards are stored in sorted order."""
+        config = {"n_phases": 2, "seed": 42}
+        save_progress(str(tmp_path), [5, 2, 0, 3], config, 10.0)
+
+        progress = load_progress(str(tmp_path))
+        assert progress["completed_shards"] == [0, 2, 3, 5]
+
+    def test_progress_overwrites(self, tmp_path):
+        """Subsequent saves overwrite previous progress."""
+        config = {"seed": 42}
+        save_progress(str(tmp_path), [0], config, 10.0)
+        save_progress(str(tmp_path), [0, 1], config, 20.0)
+
+        progress = load_progress(str(tmp_path))
+        assert progress["completed_shards"] == [0, 1]
+        assert progress["total_elapsed"] == 20.0
+
+
+class TestMergeShards:
+    def test_merge_two_shards(self, tmp_path):
+        """Merging two shards produces correct combined output."""
+        lmax = 32
+        p0 = [-1, 2, 1, -2, -2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+              -1, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+        config = {"n_phases": 2, "n_chains": 2, "n_moves": 10, "lmax": lmax, "seed": 42}
+
+        # Generate and save two shards
+        result0 = generate_dataset_for_presentation((0, p0, config))
+        result1 = generate_dataset_for_presentation((1, p0, config))
+
+        save_shard(0, [result0], str(tmp_path), lmax)
+        save_shard(1, [result1], str(tmp_path), lmax)
+
+        # Merge
+        merged_pres, merged_meta = merge_shards(str(tmp_path), 2, lmax)
+
+        # Verify shape
+        expected_rows = len(result0[0]) + len(result1[0])
+        assert merged_pres.shape == (expected_rows, 2 * lmax)
+        assert merged_meta.shape == (expected_rows, 3)
+
+        # Verify content: first half from shard 0, second half from shard 1
+        np.testing.assert_array_equal(merged_pres[:len(result0[0])], result0[0])
+        np.testing.assert_array_equal(merged_pres[len(result0[0]):], result1[0])
+
+        # Verify merged files saved to disk
+        assert (tmp_path / "presentations.npy").exists()
+        assert (tmp_path / "metadata.npy").exists()
+
+    def test_merge_preserves_all_data(self, tmp_path):
+        """All presentations survive the shard-merge round-trip."""
+        lmax = 32
+        p0 = [-1, 2, 1, -2, -2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+              -1, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+        config = {"n_phases": 3, "n_chains": 2, "n_moves": 10, "lmax": lmax, "seed": 42}
+
+        all_results = []
+        for idx in range(3):
+            result = generate_dataset_for_presentation((idx, p0, config))
+            all_results.append(result)
+            save_shard(idx, [result], str(tmp_path), lmax)
+
+        merged_pres, merged_meta = merge_shards(str(tmp_path), 3, lmax)
+
+        # Verify every presentation is valid
+        for i in range(len(merged_pres)):
+            assert is_array_valid_presentation(merged_pres[i]), (
+                f"Merged presentation {i} is invalid"
+            )
+
+        # Verify total count
+        expected_total = sum(len(r[0]) for r in all_results)
+        assert len(merged_pres) == expected_total

@@ -5,11 +5,21 @@ Generates ~1.8 million balanced presentations by applying random AC' moves to th
 1190 Miller-Schupp seed presentations through 128 phases of gradually increasing
 maximum relator length.
 
+Supports incremental shard-based saving with resume, so long-running generation
+can survive interruptions without losing progress.
+
 Usage:
     python -m ac_solver.transformer.data_generator [options]
 
-Example:
+Examples:
+    # Full generation with incremental saving
     python -m ac_solver.transformer.data_generator --n-workers 8 --seed 42
+
+    # Resume after interruption
+    python -m ac_solver.transformer.data_generator --resume
+
+    # Small test run
+    python -m ac_solver.transformer.data_generator --n-phases 2 --n-chains 2 --n-moves 10 --shard-size 50
 """
 
 import argparse
@@ -17,7 +27,6 @@ import json
 import math
 import os
 import time
-from functools import partial
 from multiprocessing import Pool
 
 import numpy as np
@@ -174,18 +183,146 @@ def generate_dataset_for_presentation(args_tuple):
     return presentations, metadata
 
 
+def load_progress(output_dir):
+    """Load generation progress from progress.json.
+
+    Parameters:
+        output_dir: path to the output directory
+
+    Returns:
+        dict with keys: completed_shards (list of int), config (dict),
+        total_elapsed (float). Returns empty defaults if file doesn't exist.
+    """
+    progress_path = os.path.join(output_dir, "progress.json")
+    if os.path.exists(progress_path):
+        with open(progress_path) as f:
+            return json.load(f)
+    return {"completed_shards": [], "total_elapsed": 0.0}
+
+
+def save_progress(output_dir, completed_shards, config, total_elapsed):
+    """Save generation progress to progress.json.
+
+    Parameters:
+        output_dir: path to the output directory
+        completed_shards: list of completed shard indices
+        config: dict of generation parameters
+        total_elapsed: total elapsed time in seconds
+    """
+    progress = {
+        "completed_shards": sorted(completed_shards),
+        "config": config,
+        "total_elapsed": total_elapsed,
+    }
+    progress_path = os.path.join(output_dir, "progress.json")
+    with open(progress_path, "w") as f:
+        json.dump(progress, f, indent=2)
+
+
+def save_shard(shard_idx, results, output_dir, lmax):
+    """Save a single shard's results to disk.
+
+    Parameters:
+        shard_idx: int, the shard index
+        results: list of (presentations, metadata) tuples from workers
+        output_dir: path to the output directory
+        lmax: max relator length, used for array width calculation
+    """
+    shard_dir = os.path.join(output_dir, "shards")
+    os.makedirs(shard_dir, exist_ok=True)
+
+    # Count total rows in this shard
+    total_rows = sum(len(pres) for pres, _ in results)
+
+    shard_presentations = np.zeros((total_rows, 2 * lmax), dtype=np.int8)
+    shard_metadata = np.zeros((total_rows, 3), dtype=np.int32)
+
+    offset = 0
+    for presentations, metadata in results:
+        n = len(presentations)
+        shard_presentations[offset : offset + n] = presentations
+        shard_metadata[offset : offset + n] = metadata
+        offset += n
+
+    pres_path = os.path.join(shard_dir, f"shard_{shard_idx:04d}_presentations.npy")
+    meta_path = os.path.join(shard_dir, f"shard_{shard_idx:04d}_metadata.npy")
+
+    np.save(pres_path, shard_presentations)
+    np.save(meta_path, shard_metadata)
+
+
+def merge_shards(output_dir, n_shards, lmax):
+    """Merge all shard files into single presentations.npy and metadata.npy.
+
+    Parameters:
+        output_dir: path to the output directory
+        n_shards: total number of shards
+        lmax: max relator length
+
+    Returns:
+        (total_presentations, total_metadata) numpy arrays
+    """
+    shard_dir = os.path.join(output_dir, "shards")
+
+    # First pass: count total rows
+    total_rows = 0
+    for shard_idx in range(n_shards):
+        pres_path = os.path.join(shard_dir, f"shard_{shard_idx:04d}_presentations.npy")
+        shard_pres = np.load(pres_path)
+        total_rows += len(shard_pres)
+
+    # Allocate final arrays
+    all_presentations = np.zeros((total_rows, 2 * lmax), dtype=np.int8)
+    all_metadata = np.zeros((total_rows, 3), dtype=np.int32)
+
+    # Second pass: fill
+    offset = 0
+    for shard_idx in range(n_shards):
+        pres_path = os.path.join(shard_dir, f"shard_{shard_idx:04d}_presentations.npy")
+        meta_path = os.path.join(shard_dir, f"shard_{shard_idx:04d}_metadata.npy")
+
+        shard_pres = np.load(pres_path)
+        shard_meta = np.load(meta_path)
+        n = len(shard_pres)
+
+        all_presentations[offset : offset + n] = shard_pres
+        all_metadata[offset : offset + n] = shard_meta
+        offset += n
+
+    # Save merged files
+    pres_path = os.path.join(output_dir, "presentations.npy")
+    meta_path = os.path.join(output_dir, "metadata.npy")
+
+    print(f"Saving merged presentations to {pres_path}...")
+    np.save(pres_path, all_presentations)
+
+    print(f"Saving merged metadata to {meta_path}...")
+    np.save(meta_path, all_metadata)
+
+    return all_presentations, all_metadata
+
+
 def generate_full_dataset(args):
     """Main entry point: generate the full ~1.8M presentation dataset.
 
+    Uses shard-based incremental saving so that progress is preserved across
+    interruptions. Each shard processes a batch of initial presentations and
+    saves results to disk immediately.
+
     Parameters:
         args: argparse.Namespace with fields:
-            n_phases, n_chains, n_moves, lmax, output_dir, n_workers, seed
+            n_phases, n_chains, n_moves, lmax, output_dir, n_workers, seed,
+            shard_size, resume, no_merge
     """
     print("Loading initial presentations...")
     initial_states = load_initial_states_from_text_file("all")
     n_presentations = len(initial_states)
     total_per_p0 = args.n_phases * args.n_chains
     total_dataset = n_presentations * total_per_p0
+
+    # Sharding
+    shard_size = args.shard_size
+    n_shards = math.ceil(n_presentations / shard_size)
 
     print(f"Configuration:")
     print(f"  Initial presentations: {n_presentations}")
@@ -196,8 +333,8 @@ def generate_full_dataset(args):
     print(f"  Total output presentations: {total_dataset:,}")
     print(f"  Workers: {args.n_workers}")
     print(f"  Seed: {args.seed}")
+    print(f"  Shard size: {shard_size} presentations ({n_shards} shards)")
 
-    # Prepare arguments for each worker
     config = {
         "n_phases": args.n_phases,
         "n_chains": args.n_chains,
@@ -205,78 +342,100 @@ def generate_full_dataset(args):
         "lmax": args.lmax,
         "seed": args.seed,
     }
-    worker_args = [
-        (idx, initial_states[idx], config) for idx in range(n_presentations)
-    ]
 
     # Output directory
     os.makedirs(args.output_dir, exist_ok=True)
 
-    # Run generation
-    start_time = time.time()
+    # Load progress for resume
+    completed_shards = set()
+    total_elapsed = 0.0
+    if args.resume:
+        progress = load_progress(args.output_dir)
+        completed_shards = set(progress.get("completed_shards", []))
+        total_elapsed = progress.get("total_elapsed", 0.0)
+        if completed_shards:
+            print(f"Resuming: {len(completed_shards)}/{n_shards} shards already complete")
 
-    all_presentations = np.zeros((total_dataset, 2 * args.lmax), dtype=np.int8)
-    all_metadata = np.zeros((total_dataset, 3), dtype=np.int32)
+    # Process shards
+    for shard_idx in range(n_shards):
+        if shard_idx in completed_shards:
+            continue
 
-    if args.n_workers <= 1:
-        # Single-process mode (useful for debugging)
-        results = []
-        for wa in tqdm(worker_args, desc="Generating dataset"):
-            results.append(generate_dataset_for_presentation(wa))
-    else:
-        # Multi-process mode
-        with Pool(processes=args.n_workers) as pool:
-            results = list(
-                tqdm(
-                    pool.imap(generate_dataset_for_presentation, worker_args),
-                    total=n_presentations,
-                    desc="Generating dataset",
+        start_idx = shard_idx * shard_size
+        end_idx = min(start_idx + shard_size, n_presentations)
+
+        worker_args = [
+            (idx, initial_states[idx], config) for idx in range(start_idx, end_idx)
+        ]
+
+        shard_start = time.time()
+        print(f"\nShard {shard_idx + 1}/{n_shards} "
+              f"(presentations {start_idx}-{end_idx - 1})...")
+
+        if args.n_workers <= 1:
+            results = []
+            for wa in tqdm(worker_args, desc=f"Shard {shard_idx + 1}"):
+                results.append(generate_dataset_for_presentation(wa))
+        else:
+            with Pool(processes=args.n_workers) as pool:
+                results = list(
+                    tqdm(
+                        pool.imap(generate_dataset_for_presentation, worker_args),
+                        total=len(worker_args),
+                        desc=f"Shard {shard_idx + 1}",
+                    )
                 )
-            )
 
-    # Assemble results
-    print("Assembling results...")
-    offset = 0
-    for presentations, metadata in results:
-        n = len(presentations)
-        all_presentations[offset : offset + n] = presentations
-        all_metadata[offset : offset + n] = metadata
-        offset += n
+        # Save shard immediately
+        save_shard(shard_idx, results, args.output_dir, args.lmax)
 
-    elapsed = time.time() - start_time
-    print(f"Generation complete in {elapsed:.1f}s ({elapsed/60:.1f} min)")
+        shard_elapsed = time.time() - shard_start
+        total_elapsed += shard_elapsed
+        completed_shards.add(shard_idx)
 
-    # Save outputs
-    pres_path = os.path.join(args.output_dir, "presentations.npy")
-    meta_path = os.path.join(args.output_dir, "metadata.npy")
-    config_path = os.path.join(args.output_dir, "config.json")
+        # Update progress
+        save_progress(args.output_dir, list(completed_shards), config, total_elapsed)
 
-    print(f"Saving presentations to {pres_path}...")
-    np.save(pres_path, all_presentations)
+        shard_rows = sum(len(pres) for pres, _ in results)
+        print(f"  Saved {shard_rows:,} presentations in {shard_elapsed:.1f}s")
 
-    print(f"Saving metadata to {meta_path}...")
-    np.save(meta_path, all_metadata)
+    print(f"\nAll shards complete in {total_elapsed:.1f}s ({total_elapsed / 60:.1f} min)")
 
-    config_out = {
-        "n_presentations": n_presentations,
-        "n_phases": args.n_phases,
-        "n_chains": args.n_chains,
-        "n_moves": args.n_moves,
-        "lmax": args.lmax,
-        "seed": args.seed,
-        "total_generated": total_dataset,
-        "elapsed_seconds": elapsed,
-    }
-    with open(config_path, "w") as f:
-        json.dump(config_out, f, indent=2)
-    print(f"Saved config to {config_path}")
+    # Merge shards into final output
+    if not args.no_merge:
+        print("\nMerging shards...")
+        all_presentations, all_metadata = merge_shards(
+            args.output_dir, n_shards, args.lmax
+        )
 
-    # Quick validation
-    print("\nValidation:")
-    print(f"  Shape: {all_presentations.shape}")
-    print(f"  Dtype: {all_presentations.dtype}")
-    file_size_mb = os.path.getsize(pres_path) / (1024 * 1024)
-    print(f"  File size: {file_size_mb:.1f} MB")
+        # Save config
+        config_out = {
+            "n_presentations": n_presentations,
+            "n_phases": args.n_phases,
+            "n_chains": args.n_chains,
+            "n_moves": args.n_moves,
+            "lmax": args.lmax,
+            "seed": args.seed,
+            "shard_size": shard_size,
+            "n_shards": n_shards,
+            "total_generated": len(all_presentations),
+            "elapsed_seconds": total_elapsed,
+        }
+        config_path = os.path.join(args.output_dir, "config.json")
+        with open(config_path, "w") as f:
+            json.dump(config_out, f, indent=2)
+        print(f"Saved config to {config_path}")
+
+        # Quick validation
+        pres_path = os.path.join(args.output_dir, "presentations.npy")
+        print("\nValidation:")
+        print(f"  Shape: {all_presentations.shape}")
+        print(f"  Dtype: {all_presentations.dtype}")
+        file_size_mb = os.path.getsize(pres_path) / (1024 * 1024)
+        print(f"  File size: {file_size_mb:.1f} MB")
+    else:
+        print("Skipping merge (--no-merge). Shard files are in: "
+              f"{os.path.join(args.output_dir, 'shards')}")
 
 
 def parse_args():
@@ -324,6 +483,22 @@ def parse_args():
         type=int,
         default=42,
         help="Random seed for reproducibility (default: 42)",
+    )
+    parser.add_argument(
+        "--shard-size",
+        type=int,
+        default=100,
+        help="Number of initial presentations per shard (default: 100)",
+    )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Resume from last checkpoint",
+    )
+    parser.add_argument(
+        "--no-merge",
+        action="store_true",
+        help="Skip final merge step (keep shard files only)",
     )
     args = parser.parse_args()
     if args.n_workers is None:
