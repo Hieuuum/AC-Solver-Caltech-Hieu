@@ -1,0 +1,12 @@
+{
+  "n_presentations": 1190,
+  "n_phases": 2,
+  "n_chains": 2,
+  "n_moves": 10,
+  "lmax": 128,
+  "seed": 42,
+  "shard_size": 50,
+  "n_shards": 24,
+  "total_generated": 4760,
+  "elapsed_seconds": 4.6983020305633545
+}
