@@ -5,3 +5,4 @@ dist/
 *.pt
 ac_solver/agents/checkpoints/
 __pycache__/
+claude.md
