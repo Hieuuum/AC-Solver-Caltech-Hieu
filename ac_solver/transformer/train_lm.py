@@ -37,7 +37,7 @@ from ac_solver.transformer.tokenizer import TOKEN_EOS, presentation_to_tokens
 
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 _DEFAULT_SHARDS_DIR = os.path.join(
-    os.path.dirname(os.path.dirname(_THIS_DIR)), "data", "transformer_dataset", "shards"
+    os.path.dirname(os.path.dirname(_THIS_DIR)), "dataset", "transformer_ds", "shards"
 )
 _DEFAULT_CKPT_DIR = os.path.join(_THIS_DIR, "checkpoints")
 

@@ -1,5 +1,7 @@
 # AC-Solver
 
+[![Dataset on HF](https://img.shields.io/badge/🤗%20Dataset-ac--solver--dataset-yellow)](https://huggingface.co/datasets/mhieuuu/ac-solver-dataset)
+
 <table>
   <tr>
     <td><img src="assets/image1.png" alt="Image 1" width="500"/></td>
