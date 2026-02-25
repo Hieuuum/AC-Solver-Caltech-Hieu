@@ -61,22 +61,23 @@ for s in shards:
 
 
 # ── CELL 3: Train Transformer Language Model ──────────────────────────────────
-# Trains for N epochs. Auto-resumes from model_final.pt if it already exists.
-# Set EXTRA_EPOCHS to the number of NEW epochs to train (e.g. 2 to add on top).
-# Checkpoints saved every 2000 steps AND a final model at the end.
+# Fresh 5-epoch retrain from scratch (shard 11 held out for validation).
+# Set RESUME = "none" to force fresh start, or "auto" to continue from checkpoint.
+# Set EPOCHS to control total training epochs.
 #
 # Saved to: ac_solver/transformer/checkpoints/
 #   ├── ckpt_step0002000.pt   (~330 MB, periodic)
 #   └── model_final.pt        (~330 MB)  ← always updated
 #
 # Expected loss:  random init ≈ 1.79  →  3 epochs ≈ 0.80  →  5 epochs ≈ 0.76
+# Val loss target: ≈ 0.73–0.74  (paper reports 0.7337)
 #
 # Estimated time per epoch (batch=256):
 #   A100: ~12–18 min  |  H100: ~5–8 min  |  L4: ~25–40 min
 #
 # NOTE: If you're on a T4 GPU, add --no-compile (torch.compile unstable on T4).
 
-EXTRA_EPOCHS = 2   # ← change this to train more/fewer additional epochs
+EPOCHS = 5  # ← total epochs to train (set --resume below: none=fresh, auto=resume)
 
 %cd "{DRIVE_ROOT}"
 
@@ -86,11 +87,17 @@ gpu = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "CPU"
 print(f"GPU: {gpu}")
 print(f"BF16 supported: {torch.cuda.is_bf16_supported() if torch.cuda.is_available() else False}")
 
-!python -m ac_solver.transformer.train_lm \
-    --epochs {EXTRA_EPOCHS} \
-    --batch-size 256 \
-    --log-interval 50 \
-    --save-interval 2000
+# --resume none  = fresh start (discard existing model_final.pt)
+# --resume auto  = continue from existing checkpoint
+import subprocess, sys
+subprocess.run([
+    sys.executable, "-m", "ac_solver.transformer.train_lm",
+    "--epochs", str(EPOCHS),
+    "--batch-size", "256",
+    "--log-interval", "50",
+    "--resume", "none",
+    "--save-interval", "2000",
+], check=True)
 
 # Verify final checkpoint
 ckpt_path = 'ac_solver/transformer/checkpoints/model_final.pt'

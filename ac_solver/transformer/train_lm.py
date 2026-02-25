@@ -315,11 +315,15 @@ def train(args):
     # --- Resume from checkpoint ---
     start_step = 0
     start_epoch = 0
-    resume_path = None if (args.resume or "").lower() == "none" else args.resume
-    if resume_path is None:
+    force_scratch = (args.resume or "").lower() == "none"
+    if force_scratch:
+        resume_path = None
+    elif args.resume:
+        resume_path = args.resume
+    else:
+        # Auto-detect: resume from model_final.pt if it exists
         default_resume = os.path.join(args.checkpoints_dir, "model_final.pt")
-        if os.path.exists(default_resume):
-            resume_path = default_resume
+        resume_path = default_resume if os.path.exists(default_resume) else None
     if resume_path is not None:
         if not os.path.exists(resume_path):
             raise FileNotFoundError(f"Resume checkpoint not found: {resume_path}")
