@@ -300,20 +300,40 @@ def train(args):
     loss_fn = nn.CrossEntropyLoss(ignore_index=-100)
     os.makedirs(args.checkpoints_dir, exist_ok=True)
 
+    # --- Resume from checkpoint ---
+    start_step = 0
+    start_epoch = 0
+    resume_path = None if (args.resume or "").lower() == "none" else args.resume
+    if resume_path is None:
+        default_resume = os.path.join(args.checkpoints_dir, "model_final.pt")
+        if os.path.exists(default_resume):
+            resume_path = default_resume
+    if resume_path is not None:
+        if not os.path.exists(resume_path):
+            raise FileNotFoundError(f"Resume checkpoint not found: {resume_path}")
+        print(f"Resuming from: {resume_path}")
+        ckpt = torch.load(resume_path, map_location=device)
+        raw_model = model._orig_mod if hasattr(model, "_orig_mod") else model
+        raw_model.load_state_dict(ckpt["model_state_dict"])
+        optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+        start_step = ckpt["step"]
+        start_epoch = ckpt["epoch"]
+        print(f"  Resumed at epoch={start_epoch}, step={start_step}")
+
     # --- LR schedule ---
-    total_steps = args.epochs * steps_per_epoch
-    warmup_steps = max(1, int(0.05 * total_steps))
+    total_steps = start_step + args.epochs * steps_per_epoch
+    warmup_steps = max(1, int(0.05 * (args.epochs * steps_per_epoch)))
     print(
         f"Total steps ≈ {total_steps:,}  |  warmup: {warmup_steps:,}  |  "
         f"epochs: {args.epochs}  |  batch: {args.batch_size}"
     )
 
     # --- Training loop ---
-    step = 0
+    step = start_step
     running_loss = 0.0
     t0 = time.time()
 
-    for epoch in range(1, args.epochs + 1):
+    for epoch in range(start_epoch + 1, start_epoch + args.epochs + 1):
         model.train()
         epoch_loss = 0.0
         epoch_steps = 0
@@ -389,7 +409,7 @@ def train(args):
                 print(f"  [ckpt] {ckpt_path}")
 
         print(
-            f"=== Epoch {epoch}/{args.epochs} | "
+            f"=== Epoch {epoch}/{start_epoch + args.epochs} | "
             f"avg loss: {epoch_loss / max(epoch_steps, 1):.4f} ==="
         )
 
@@ -398,7 +418,7 @@ def train(args):
     torch.save(
         {
             "step": step,
-            "epoch": args.epochs,
+            "epoch": start_epoch + args.epochs,
             "model_state_dict": (
                 model._orig_mod.state_dict()
                 if hasattr(model, "_orig_mod")
@@ -469,6 +489,13 @@ def parse_args():
         help="Use padded batches instead of sequence packing (legacy mode)",
     )
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--resume",
+        type=str,
+        default=None,
+        help="Path to checkpoint to resume from. Defaults to checkpoints/model_final.pt "
+             "if it exists. Pass 'none' to force training from scratch.",
+    )
     return parser.parse_args()
 
 

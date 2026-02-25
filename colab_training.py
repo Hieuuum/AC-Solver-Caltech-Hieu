@@ -60,20 +60,22 @@ for s in shards:
 
 
 # ── CELL 3: Train Transformer Language Model ──────────────────────────────────
-# Trains for 3 epochs (~1128 gradient steps at batch=512, context=1024).
+# Trains for N epochs. Auto-resumes from model_final.pt if it already exists.
+# Set EXTRA_EPOCHS to the number of NEW epochs to train (e.g. 2 to add on top).
 # Checkpoints saved every 2000 steps AND a final model at the end.
 #
 # Saved to: ac_solver/transformer/checkpoints/
-#   ├── ckpt_step0002000.pt   (~200 MB, periodic)
-#   ├── ckpt_step0004000.pt   (~200 MB, periodic)  [if > 2000 steps]
-#   └── model_final.pt        (~200 MB)  ← this is what you need
+#   ├── ckpt_step0002000.pt   (~330 MB, periodic)
+#   └── model_final.pt        (~330 MB)  ← always updated
 #
-# Expected loss:  random init ≈ 1.79  →  converged ≈ 1.0
+# Expected loss:  random init ≈ 1.79  →  3 epochs ≈ 0.80  →  5 epochs ≈ 0.76
 #
-# Estimated time:
-#   A100: ~20–30 min  |  H100: ~8–15 min  |  L4: ~45–90 min
+# Estimated time per epoch (batch=256):
+#   A100: ~12–18 min  |  H100: ~5–8 min  |  L4: ~25–40 min
 #
 # NOTE: If you're on a T4 GPU, add --no-compile (torch.compile unstable on T4).
+
+EXTRA_EPOCHS = 2   # ← change this to train more/fewer additional epochs
 
 %cd "{DRIVE_ROOT}"
 
@@ -84,8 +86,8 @@ print(f"GPU: {gpu}")
 print(f"BF16 supported: {torch.cuda.is_bf16_supported() if torch.cuda.is_available() else False}")
 
 !python -m ac_solver.transformer.train_lm \
-    --epochs 3 \
-    --batch-size 512 \
+    --epochs {EXTRA_EPOCHS} \
+    --batch-size 256 \
     --log-interval 50 \
     --save-interval 2000
 
