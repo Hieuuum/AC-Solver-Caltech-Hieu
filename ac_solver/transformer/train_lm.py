@@ -211,12 +211,24 @@ def train(args):
         print(f"Mixed precision: {amp_dtype}")
 
     # --- Discover shards ---
-    shard_paths = sorted(
+    all_shard_paths = sorted(
         glob.glob(os.path.join(args.shards_dir, "shard_*_presentations.npy"))
     )
-    if not shard_paths:
+    if not all_shard_paths:
         raise FileNotFoundError(f"No shard files found in: {args.shards_dir}")
-    print(f"Shards found: {len(shard_paths)}")
+
+    # Hold out last shard for validation (matches paper's 10% split).
+    # With 12 shards: 11 train + 1 val = 91.7% / 8.3% split.
+    # Pass --no-val to disable and train on all shards.
+    if args.no_val or len(all_shard_paths) < 2:
+        shard_paths = all_shard_paths
+        val_shard_paths = []
+    else:
+        shard_paths = all_shard_paths[:-1]
+        val_shard_paths = all_shard_paths[-1:]
+
+    print(f"Shards found: {len(all_shard_paths)}  "
+          f"(train: {len(shard_paths)}, val: {len(val_shard_paths)})")
 
     lmax = np.load(shard_paths[0]).shape[1] // 2
     rows_per_shard = np.load(shard_paths[0]).shape[0]
@@ -408,9 +420,53 @@ def train(args):
                 )
                 print(f"  [ckpt] {ckpt_path}")
 
+        train_avg = epoch_loss / max(epoch_steps, 1)
+
+        # --- Validation loss ---
+        val_str = ""
+        if val_shard_paths:
+            model.eval()
+            val_dataset = PackedShardDataset(
+                shard_paths=val_shard_paths,
+                lmax=lmax,
+                context_length=args.context_length,
+                shuffle=False,
+                seed=args.seed,
+            )
+            val_loader = DataLoader(
+                val_dataset,
+                batch_size=args.batch_size,
+                num_workers=0,
+                pin_memory=use_cuda,
+            )
+            val_loss_sum = 0.0
+            val_steps = 0
+            with torch.no_grad():
+                for v_in, v_tgt in val_loader:
+                    v_in  = v_in.to(device, non_blocking=True)
+                    v_tgt = v_tgt.to(device, non_blocking=True)
+                    if amp_dtype is not None:
+                        with torch.autocast(device_type="cuda", dtype=amp_dtype):
+                            v_logits = model(v_in)
+                            v_loss   = loss_fn(
+                                v_logits.reshape(-1, v_logits.size(-1)),
+                                v_tgt.reshape(-1),
+                            )
+                    else:
+                        v_logits = model(v_in)
+                        v_loss   = loss_fn(
+                            v_logits.reshape(-1, v_logits.size(-1)),
+                            v_tgt.reshape(-1),
+                        )
+                    val_loss_sum += v_loss.item()
+                    val_steps    += 1
+            val_avg = val_loss_sum / max(val_steps, 1)
+            val_str = f" | val loss: {val_avg:.4f}"
+            model.train()
+
         print(
             f"=== Epoch {epoch}/{start_epoch + args.epochs} | "
-            f"avg loss: {epoch_loss / max(epoch_steps, 1):.4f} ==="
+            f"train loss: {train_avg:.4f}{val_str} ==="
         )
 
     # --- Final model ---
@@ -489,6 +545,14 @@ def parse_args():
         help="Use padded batches instead of sequence packing (legacy mode)",
     )
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--no-val",
+        action="store_true",
+        default=False,
+        help="Disable validation: train on all shards (no held-out set). "
+             "Use this to reproduce old behaviour or when re-training for "
+             "maximum coverage.",
+    )
     parser.add_argument(
         "--resume",
         type=str,
