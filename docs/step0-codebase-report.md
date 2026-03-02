@@ -1,8 +1,17 @@
-# Step 0: Codebase Understanding Report — AC-Solver
+# Step 0: Codebase Understanding Report — AC-Solver-Caltech-Hieu
+> **Revision 2** — Written from scratch after hands-on file-by-file inspection of every source file.
+> Supersedes the placeholder `docs/step0-codebase-report.md` that incorrectly stated the transformer was absent.
 
-## Context
+---
 
-This report documents a thorough, code-verified exploration of the AC-Solver repository at `/home/user/AC-Solver-Caltech-Hieu`. The goal is to fully understand the codebase before implementing Proposal B: Transformer-Guided RL for AC Trivialization, which connects the paper's disconnected PPO agent and transformer language model.
+## Executive Summary
+
+The repository contains **two fully implemented, but disconnected AI systems**:
+
+1. **PPO Agent** — `ac_solver/agents/` — a CleanRL-style PPO loop with a 2-layer FFN actor/critic, ready to run.
+2. **Transformer Language Model** — `ac_solver/transformer/` — an 8-layer decoder-only GPT-style model with **all weights already trained** (`model_final.pt`, 3 epochs on 1.83M presentations), **EOS embeddings already extracted** (`embeddings.npy`, shape `(1190, 512)`), and a **hardness oracle already present** (`hardness_oracle.pt`).
+
+Connecting these two systems is the entire goal of **Proposal B**. The good news: both pipelines are complete and working. The only work is integration.
 
 ---
 
@@ -14,36 +23,55 @@ AC-Solver-Caltech-Hieu/
 │   ├── __init__.py                     # Exports: ACEnv, ACEnvConfig, bfs, greedy_search, train_ppo
 │   ├── envs/
 │   │   ├── ac_env.py                   # ACEnv (Gymnasium Env), ACEnvConfig (dataclass)
-│   │   ├── ac_moves.py                 # concatenate_relators, conjugate, ACMove dispatcher
+│   │   ├── ac_moves.py                 # concatenate_relators, conjugate, ACMove dispatcher (12 moves)
 │   │   └── utils.py                    # is_valid, is_trivial, simplify_relator, convert/change_max_length
 │   ├── agents/
-│   │   ├── ppo.py                      # Entry point: parse → get_env → Agent → ppo_training_loop
-│   │   ├── ppo_agent.py                # Agent(nn.Module): actor + critic FFNs
-│   │   ├── training.py                 # ppo_training_loop: rollout → GAE → clipped PPO update
+│   │   ├── ppo.py                      # Entry point: parse_args → get_env → Agent → ppo_training_loop
+│   │   ├── ppo_agent.py                # Agent(nn.Module): actor + critic FFNs, build_network helper
+│   │   ├── training.py                 # ppo_training_loop: rollout → GAE → clipped PPO update (411 lines)
 │   │   ├── environment.py              # make_env, get_env (SyncVectorEnv factory)
 │   │   ├── args.py                     # All CLI hyperparameters via argparse
 │   │   └── utils.py                    # load_initial_states_from_text_file
+│   ├── transformer/
+│   │   ├── model.py                    # ACTransformer (decoder-only GPT), CausalSelfAttention, MLP block
+│   │   ├── tokenizer.py                # presentation_to_tokens, tokens_to_presentation (6-token vocab)
+│   │   ├── data_generator.py           # Algorithm 6 (Appendix D): generates ~1.8M presentations
+│   │   ├── train_lm.py                 # LM training loop: packed sequences, BF16, torch.compile
+│   │   ├── extract_embeddings.py       # Extracts EOS-token hidden states → embeddings.npy
+│   │   ├── train_oracle.py             # Hardness oracle: 2-layer MLP on EOS embeddings, 5-fold CV
+│   │   ├── prepare_dataset.py          # Dataset preparation utilities
+│   │   ├── download_dataset.py         # HuggingFace dataset download helper
+│   │   ├── upload_dataset.py           # HuggingFace dataset upload helper
+│   │   └── checkpoints/               # *** PRE-TRAINED ARTIFACTS ***
+│   │       ├── model_final.pt          # Final LM checkpoint (epoch 3, verified loadable)
+│   │       ├── ckpt_step0002000.pt     # Intermediate checkpoint at step 2,000
+│   │       ├── ckpt_step0004000.pt     # Intermediate checkpoint at step 4,000
+│   │       ├── embeddings.npy          # Pre-extracted EOS embeddings, shape (1190, 512), float32
+│   │       ├── labels.npy              # GS labels: 1=solved(533), 0=unsolved(657), shape (1190,)
+│   │       └── hardness_oracle.pt      # Trained MLP oracle (may need reload workaround)
 │   └── search/
-│       ├── greedy.py                   # greedy_search (priority queue, min-length heuristic)
-│       ├── breadth_first.py            # bfs (standard BFS)
+│       ├── greedy.py                   # Priority-queue greedy search (min-length heuristic)
+│       ├── breadth_first.py            # Standard BFS (known bug in word_lengths at line 64-66)
 │       └── miller_schupp/
-│           ├── miller_schupp.py        # MS presentation generator + batch search runner
+│           ├── miller_schupp.py        # MS(n,w) presentation generator + batch search runner
 │           └── data/
-│               ├── all_presentations.txt           # 1190 MS presentations
-│               ├── greedy_solved_presentations.txt  # 533 GS-solved
+│               ├── all_presentations.txt           # 1190 MS presentations (GS-solved first)
+│               ├── greedy_solved_presentations.txt  # 533 GS-solved presentations
 │               ├── greedy_search_paths.txt          # 533 solution paths
-│               └── bfs_solved_presentations.txt     # 278 BFS-solved
-├── barcode_analysis/                   # C++ code for topological data analysis (Section 5)
-│   ├── 5_steps_neibourhoods/           # Barcode feature computation
-│   └── simplex_data_generation/        # AC-graph simplex data generation
-├── notebooks/
-│   ├── Checking-AC-Paths.ipynb
-│   ├── Classical-Search-and-PPO-in-AC-Environment.ipynb
-│   ├── Scaling-PPO-in-AC-Environment.ipynb
-│   └── Stable-AK3.ipynb
-├── tests/                              # pytest tests for env, search, PPO components
-├── pyproject.toml                      # Poetry project, Python >=3.9,<3.12
-├── RLpath1546.txt                      # Example RL solution path (1546 actions)
+│               └── __init__.py
+├── dataset/
+│   └── transformer_ds/
+│       ├── config.json                 # {n_presentations:1190, n_phases:128, n_chains:12, n_moves:1000, lmax:128, total_generated:1827840}
+│       ├── presentations.npy           # Merged 1.83M presentations, shape (1827840, 256), dtype int8
+│       ├── metadata.npy                # Per-presentation metadata (origin_index, phase, chain)
+│       ├── progress.json               # Generation progress log
+│       └── shards/                     # 12 shards × ~150K presentations each
+├── barcode_analysis/                   # C++ topological data analysis (Section 5 of paper)
+├── notebooks/                          # 4 Jupyter notebooks
+├── tests/                              # pytest tests (10 files covering env, search, PPO)
+├── pyproject.toml                      # Poetry project, Python >=3.9,<3.13
+├── colab_training.py                   # Google Colab training script
+├── RLpath1546.txt                      # Example RL solution path for AK(3)
 └── README.md
 ```
 
@@ -53,52 +81,61 @@ AC-Solver-Caltech-Hieu/
 
 ### 2a. Entry Point
 
-**File:** `ac_solver/agents/ppo.py` — `train_ppo()` (line 23)
+**`ac_solver/agents/ppo.py` — `train_ppo()` (line 23)**
 
-Flow: `parse_args()` → `get_env()` → `Agent()` → `ppo_training_loop()`
+Call flow:
+```
+parse_args()
+  └─ get_env(args)    [environment.py]
+      └─ load_initial_states_from_text_file(states_type)
+      └─ normalize all presentations to max_relator_length=36 → 72-dim arrays
+      └─ SyncVectorEnv([make_env(presentation, args) for i in range(num_envs)])
+  └─ Agent(envs, nodes_counts)    [ppo_agent.py]
+  └─ Adam optimizer
+  └─ ppo_training_loop(...)    [training.py]
+```
 
-### 2b. Environment & Observations
+### 2b. Observation Encoding
 
-**File:** `ac_solver/agents/environment.py` — `get_env()` (line 60)
+**`ac_solver/agents/environment.py` — `get_env()` (line 60)**
 
-- Loads all 1190 MS presentations via `load_initial_states_from_text_file(states_type="all")` from `ac_solver/agents/utils.py:10`
-- **Normalizes all presentations to `max_relator_length=36`** (hardcoded at line 87), yielding **72-dimensional `int8` arrays** (2 relators × 36 elements each)
-- Native data has variable lengths: 36 (n=1, max_rel=18), 40 (n=2, max_rel=20), ... up to 72 (n=7, max_rel=36), but all are zero-padded to 36 per relator
-- Tokens: `1=x, -1=x⁻¹, 2=y, -2=y⁻¹, 0=padding`
-- Creates `SyncVectorEnv` with `num_envs` parallel copies (default 4, paper uses 28)
+- When `--states-type all` (default): loads all **1190** MS presentations from `all_presentations.txt`
+- When `--states-type solved`: loads only **533** GS-solved from `greedy_solved_presentations.txt`
+- **Normalizes all to `max_relator_length=36`** (hardcoded line 87) → **72-dim `int8` arrays**
+- Token values: `1=x, -1=x⁻¹, 2=y, -2=y⁻¹, 0=padding`
 
-**File:** `ac_solver/envs/ac_env.py` — `ACEnv` (line 56)
-- `observation_space = Box(-2, 2, shape=(72,), dtype=int8)`
-- `action_space = Discrete(12)`
+**`ac_solver/envs/ac_env.py` — `ACEnv`**
+```python
+observation_space = Box(low=-2, high=2, shape=(72,), dtype=int8)
+action_space = Discrete(12)
+```
+
+The **raw `int8` presentation array** is fed directly as a float tensor — no embedding layer, no normalization.
 
 ### 2c. Actor & Critic Networks
 
-**File:** `ac_solver/agents/ppo_agent.py` — `Agent` (line 52)
+**`ac_solver/agents/ppo_agent.py` — `Agent` (line 52)**
 
 ```
-Critic: input_dim → nodes[0] → nodes[1] → 1
-Actor:  input_dim → nodes[0] → nodes[1] → 12
+Critic: 72 → nodes[0] → nodes[1] → 1      (value function, Tanh activations)
+Actor:  72 → nodes[0] → nodes[1] → 12     (policy logits, Tanh activations)
 ```
 
-- Default `nodes_counts=[256, 256]`; paper uses `[512, 512]` (pass `--nodes-counts 512 512`)
-- `input_dim = 72` (from observation space)
-- `tanh` activations between all layers
-- Orthogonal weight init (std=sqrt(2) for hidden, 1.0 for critic output, 0.01 for actor output)
-- No shared trunk — actor and critic are fully separate `nn.Sequential` modules
-- The raw int8 presentation array is fed directly as a float tensor — **no embedding layer, no normalization**
+- **Default `nodes_counts=[256, 256]`** (2 hidden layers). Paper uses `[512, 512]` → pass `--nodes-counts 512 512`
+- Orthogonal weight init: `std=sqrt(2)` hidden, `std=1.0` critic output, `std=0.01` actor output
+- **Fully separate** actor and critic networks (no shared trunk)
+- `get_action_and_value(x)` → Categorical distribution → sample or evaluate action
 
-### 2d. 12 AC' Moves
+### 2d. The 12 AC' Moves
 
-**File:** `ac_solver/envs/ac_moves.py` — `ACMove()` (line 159)
-
-The complete mapping (from the docstring, verified against the code logic):
+**`ac_solver/envs/ac_moves.py` — `ACMove()` (line 159)**
 
 | ID | Move | Type |
 |----|------|------|
-| 0 | r₁ → r₁ r₀ | Concatenation |
-| 1 | r₀ → r₀ r₁⁻¹ | Concatenation |
-| 2 | r₁ → r₁ r₀⁻¹ | Concatenation |
-| 3 | r₀ → r₀ r₁ | Concatenation |
+| 0 | r₁ → r₁ · r₀ | Concatenation |
+| 1 | r₀ → r₀ · r₁⁻¹ | Concatenation |
+| 2 | r₁ → r₁ · r₀⁻¹ | Concatenation |
+| 3 | r₀ → r₀ · r₁ | Concatenation |
 | 4 | r₁ → x⁻¹ r₁ x | Conjugation |
 | 5 | r₀ → y⁻¹ r₀ y | Conjugation |
 | 6 | r₁ → y⁻¹ r₁ y | Conjugation |
@@ -108,285 +145,320 @@ The complete mapping (from the docstring, verified against the code logic):
 | 10 | r₁ → y r₁ y⁻¹ | Conjugation |
 | 11 | r₀ → x⁻¹ r₀ x | Conjugation |
 
-**Pattern:** Even IDs (0,2,4,6,8,10) affect r₁; Odd IDs (1,3,5,7,9,11) affect r₀.
-
-After each move, `simplify_presentation()` is called with `cyclical=True` (default), which applies both free and cyclic reduction. If the result would exceed `max_relator_length`, the presentation is returned unchanged.
+Pattern: Even IDs (0,2,4,6,8,10) affect r₁; Odd IDs (1,3,5,7,9,11) affect r₀.
+After every move, `simplify_presentation(cyclical=True)` is called. If the result exceeds `max_relator_length`, the presentation is returned **unchanged** (move is a no-op).
 
 ### 2e. Reward Function
 
-**File:** `ac_solver/envs/ac_env.py` — `step()` (line 95)
+**`ac_solver/envs/ac_env.py` — `step()` (line 95)**
 
 ```python
-done = sum(self.lengths) == 2     # trivial iff both relators have length 1
+done = (sum(self.lengths) == 2)          # trivial iff both relators have length 1
 reward = self.max_reward * done - sum(self.lengths) * (1 - done)
-# where max_reward = horizon_length * max_relator_length * n_gen = T * 36 * 2
+# max_reward = horizon_length × max_relator_length × n_gen = T × 36 × 2
 ```
 
-Then in the training loop (`training.py:233`), rewards are divided by `max_reward`, and via `TransformReward` wrapper they are clipped to `[-10, 1000]`.
+Rewards then divided by `max_reward` (training.py:233) and clipped to `[-10, 1000]` via `TransformReward` wrapper.
 
-**Effective reward after normalization:**
-- Non-terminal: `−sum_of_relator_lengths / max_reward` (very small negative)
-- Terminal: `+1.0` (after rescaling)
+**Effective post-normalization rewards:**
+- Non-terminal: `−sum_of_relator_lengths / max_reward` ≈ very small negative
+- Terminal (trivial): `+1.0`
+
+This matches the paper's `-min(10, length(s_{t+1}))` / `+1000` scheme after normalization.
 
 ### 2f. Initial Presentation Sampling
 
-**File:** `ac_solver/agents/training.py` — lines 199-224
+**`ac_solver/agents/training.py` — lines 199–224**
 
-**Verified data ordering:** `all_presentations.txt` has the 533 GS-solved presentations first (indices 0–532), then the 657 GS-unsolved (indices 533–1189). Confirmed by comparing first 533 lines of `all_presentations.txt` with `greedy_solved_presentations.txt` — exact match.
+**Data ordering (verified):** `all_presentations.txt` has the **533 GS-solved first** (indices 0–532), then **657 GS-unsolved** (indices 533–1189).
 
-**Round 1 (first pass, lines 207-208):** Round-robin — each env sequentially gets the next unprocessed index. Every presentation is visited exactly once.
+**Round 1 (first complete pass):** Sequential round-robin — each env gets the next unprocessed index. Every presentation is visited exactly once.
 
-**After Round 1 (lines 210-221):** On each episode end for environment `i`:
-- If no PPO-solved presentations yet, OR with probability `1 - repeat_solved_prob` (= 0.75): sample uniformly from PPO-unsolved set
-- With probability `repeat_solved_prob` (= 0.25): sample uniformly from PPO-solved set
+**After Round 1 (steady-state):** On each episode end for environment `i`:
+```python
+if len(success_record["solved"]) == 0 or (
+    success_record["unsolved"]
+    and random.uniform(0, 1) > args.repeat_solved_prob  # default 0.25
+):
+    curr_states[i] = random.choice(list(success_record["unsolved"]))   # 75% probability
+else:
+    curr_states[i] = random.choice(list(success_record["solved"]))     # 25% probability
+```
 
-The "PPO-solved" set is built dynamically during training (not pre-loaded). The 75/25 split matches the paper's stated 3/4 unsolved, 1/4 solved ratio.
+The `success_record["solved"]` set is **built dynamically** during training, not pre-loaded. This 75/25 split matches the paper.
 
 ### 2g. Horizon Length
 
-**File:** `ac_solver/agents/args.py` — line 100
-
-Default: `--horizon-length 2000` (paper uses 200 for constant-horizon; variable 200→400→800→1200 for scaling experiments). **No variable-horizon scheduling logic exists in the codebase** — it would need to be implemented.
+**Default:** `--horizon-length 2000`
+**Paper:** T=200 (constant) or T∈{200,400,800,1200} (variable — not implemented in codebase).
 
 ### 2h. Training Loop
 
-**File:** `ac_solver/agents/training.py` — `ppo_training_loop()` (line 68)
+**`ac_solver/agents/training.py` — `ppo_training_loop()` (line 68)**
 
-Standard CleanRL-style single-file PPO:
-- Collects `num_steps` steps across `num_envs` parallel envs → `batch_size = num_steps × num_envs`
-- GAE with `γ=0.99, λ=0.95` (paper uses `γ=0.999`)
-- `update_epochs=1` epoch per rollout
-- `clip_coef=0.2` (ε=0.2 in paper)
-- Linear LR decay from `lr` to `min_lr_frac × lr` (default: decay to 0)
-- Also supports cosine LR decay and warmup
-- Supports both clipped loss (default) and KL-penalty loss
-- Checkpoints every 100 updates to `out/<run_name>/ckpt.pt` (line 384-408)
-- Logs to W&B when `--wandb-log` is set
+CleanRL-style PPO:
+1. Rollout phase: `num_steps` × `num_envs` parallel envs
+2. GAE: `γ=0.99` (paper: 0.999), `λ=0.95`
+3. PPO update: `update_epochs=1`, `clip_coef=0.2`, `minibatches=4`
+4. LR schedule: linear decay (or cosine) from `lr` to `min_lr_frac × lr`
+5. Checkpoints every 100 updates to `out/<run_name>/ckpt.pt`
+6. Optional W&B logging
 
 ---
 
-## 3. Transformer Pipeline
+## 3. Transformer Pipeline — Fully Implemented
 
-### Critical Finding: THE TRANSFORMER IS NOT IN THIS REPOSITORY
+> **Critical finding:** The placeholder report incorrectly stated the transformer was absent. It is **fully implemented, trained, and has pre-extracted embeddings ready to use.**
 
-Confirmed via:
-- `grep -ri "transformer|attention|d_model|decoder|embedding|tokeniz"` across all `.py` files → **zero results**
-- No `.pt` or `.pth` model weight files anywhere in the repo
-- No transformer architecture code in any file or notebook
-- No data generation scripts for the 1.8M training presentations
+### 3a. Architecture
 
-**What needs to be built from scratch:**
-1. Transformer model architecture (8-layer decoder-only, d_model=512, 4 heads, context window 1024, tied embeddings)
-2. Tokenization scheme (6 tokens: x, y, x⁻¹, y⁻¹, separator, EOS)
-3. Training data generation (Algorithm 6 from Appendix D: apply random AC moves to the 1190 MS presentations to generate ~1.8M AC-equivalent presentations)
-4. Training pipeline for next-token prediction
-5. Embedding extraction (EOS token's final-layer hidden state — consistent with t-SNE analysis in Figure 17)
+**`ac_solver/transformer/model.py` — `ACTransformer` (line 91)**
 
-### Pre-trained Weights: NOT INCLUDED — must train from scratch
-
-### Tokenization Mapping for the Transformer
-The PPO environment uses `{1=x, -1=x⁻¹, 2=y, -2=y⁻¹, 0=padding}`. The transformer needs a different tokenization:
 ```
-PPO encoding → Transformer token
-  1 (x)      → token 0
- -1 (x⁻¹)    → token 1
-  2 (y)      → token 2
- -2 (y⁻¹)    → token 3
- separator   → token 4  (between r₁ and r₂)
- EOS         → token 5
+8-layer decoder-only transformer
+  vocab_size     = 6   (x, x⁻¹, y, y⁻¹, SEP, EOS)
+  d_model        = 512
+  n_heads        = 4   (head_dim = 128)
+  context_length = 1024
+  n_layers       = 8
+  Parameters     = 25,710,592  (verified)
+  Tied embeddings: self.unembed.weight = self.token_emb.weight  (W_E = W_U^T)
 ```
 
+Pre-norm blocks: `LayerNorm → CausalSelfAttention → residual → LayerNorm → 4×MLP(GELU) → residual`
+
+### 3b. Tokenization
+
+**`ac_solver/transformer/tokenizer.py`**
+
+```
+TOKEN_X     = 0  (PPO: 1)     x
+TOKEN_X_INV = 1  (PPO: -1)    x⁻¹
+TOKEN_Y     = 2  (PPO: 2)     y
+TOKEN_Y_INV = 3  (PPO: -2)    y⁻¹
+TOKEN_SEP   = 4               separator between r₀ and r₁
+TOKEN_EOS   = 5               end of sequence
+```
+
+Token sequence: `[r₀_tokens..., SEP, r₁_tokens..., EOS]`
+Zero-padded positions are **stripped** before tokenization — sequences have variable length.
+
+Key API:
+- `presentation_to_tokens(presentation, max_relator_length=None) → list[int]`
+- `tokens_to_presentation(tokens, max_relator_length) → np.ndarray`
+
+### 3c. Training Data Generation
+
+**`ac_solver/transformer/data_generator.py`** — Implements Algorithm 6 (Appendix D)
+
+For each of the 1190 MS presentations P₀:
+- Run 128 phases × 12 parallel chains
+- Each chain: apply 1000 random AC' moves within a gradually increasing length bound
+- Save each resulting presentation
+
+Already executed with: `n_phases=128, n_chains=12, n_moves=1000, lmax=128, seed=42`
+**Total generated: 1,827,840 presentations** stored in `dataset/transformer_ds/`
+
+### 3d. Embedding Extraction Method
+
+**`ac_solver/transformer/extract_embeddings.py`**
+
+**Method: EOS-token hidden state (after final LayerNorm, before unembedding)**
+
+```python
+tokens = presentation_to_tokens(pres)   # [r₀..., SEP, r₁..., EOS]
+# EOS is always the LAST token in the sequence
+hidden = model.get_hidden_states(input_ids)   # (B, T, 512)
+embedding = hidden[i, eos_position, :]        # (512,) — the EOS hidden state
+```
+
+`model.get_hidden_states()` (line 162) returns `ln_f(last_block_output)` — post-final-LayerNorm, pre-unembed.
+
+**Pre-extracted for all 1190 MS presentations:**
+- `checkpoints/embeddings.npy`: shape `(1190, 512)`, dtype `float32` ✓
+- `checkpoints/labels.npy`: shape `(1190,)`, dtype `int32`; `1=GS-solved, 0=GS-unsolved` ✓
+- Verified counts: 533 solved + 657 unsolved = 1190 ✓
+
+### 3e. Hardness Oracle
+
+**`ac_solver/transformer/train_oracle.py` — `HardnessOracle`**
+
+```
+Linear(512, 128) → ReLU → Linear(128, 1)
+Output: raw logit; sigmoid > 0.5 = "GS-solved"
+```
+
+5-fold stratified CV on the 1190 embeddings. Final model trained on full dataset and saved to `hardness_oracle.pt`.
+
+**Known issue:** `hardness_oracle.pt` fails to load in the conda env (`numpy._core` not found in numpy 1.24.3). **Workaround:** re-run `train_oracle.py` — takes ~1 minute since embeddings are already computed.
+
+### 3f. Checkpoint Status
+
+| Artifact | File | Status |
+|----------|------|--------|
+| LM weights (final) | `checkpoints/model_final.pt` | ✓ Present (epoch 3) |
+| EOS embeddings | `checkpoints/embeddings.npy` | ✓ **Fully usable**, shape (1190,512) |
+| GS labels | `checkpoints/labels.npy` | ✓ **Fully usable** |
+| Hardness oracle | `checkpoints/hardness_oracle.pt` | ⚠ Needs re-training in current env |
+
 ---
 
-## 4. Dataset
+## 4. Dataset Inventory
 
-| File | Count | Verified | Notes |
-|------|-------|----------|-------|
-| `data/all_presentations.txt` | **1190** | Yes | MS series n≤7, len(w)≤7. Ordered: GS-solved first (0-532), then GS-unsolved (533-1189) |
-| `data/greedy_solved_presentations.txt` | **533** | Yes | Exact match with first 533 lines of all_presentations.txt |
-| `data/greedy_search_paths.txt` | **533** | Yes | Format: `[(action_id, total_length), ...]` — path length = `len(path) - 1` (first entry is initial state with action=-1) |
-| `data/bfs_solved_presentations.txt` | **278** | Yes | BFS-solved subset (≤1M nodes explored) |
+| Source | Count | Format | Notes |
+|--------|-------|--------|-------|
+| `all_presentations.txt` | **1190** | Python list literals | GS-solved first (0–532), then unsolved |
+| `greedy_solved_presentations.txt` | **533** | Same | Exact match with first 533 of all_presentations.txt |
+| `greedy_search_paths.txt` | **533** | `[(action_id, total_len), ...]` | First entry = initial state; path_len = `len - 1` |
+| `embeddings.npy` | **1190** × 512 | float32 | Pre-computed EOS embeddings, ready to use |
+| Transformer dataset | **1,827,840** | int8 (256-dim) | 12 shards in `dataset/transformer_ds/shards/` |
 
-**Native presentation sizes (before normalization):**
-- 36 elements (max_rel=18, n=1): 340 presentations
-- 40 elements (max_rel=20, n=2): 170 presentations
-- 48 elements (max_rel=24, n=3): 170 presentations
-- 56 elements (max_rel=28, n=4): 170 presentations
-- 64 elements (max_rel=32, n=5): 170 presentations
-- 72 elements (max_rel=36, n=6-7): 170 presentations
-
-All normalized to 72 elements (max_relator_length=36) during PPO training.
-
-**GS-unsolved:** 657 presentations = indices 533-1189 of all_presentations.txt. No separate file; derive by exclusion.
-
-**PPO-solved labels:** NOT stored in the repo. The paper's 431/535 numbers come from W&B training logs. Must re-run PPO or access original W&B project.
-
-**Greedy search path lengths:** Extractable from `greedy_search_paths.txt`. Path length = `len(path) - 1` since the first entry `(-1, initial_length)` represents the starting state.
+**PPO-solved labels:** Not stored. Paper's 431/535 numbers come from W&B runs. Must re-run to reproduce.
 
 ---
 
-## 5. Search Algorithms
+## 5. Dependencies & Environment Setup
 
-### Greedy Search (`ac_solver/search/greedy.py`)
-- Priority queue (min-heap) ordered by **total relator length** (sum of both relator lengths)
-- Expands the node with minimum total length first
-- Terminates when total length = 2 (trivial presentation) or node limit reached
-- Default: max 10,000 nodes; MS data used 1,000,000
+**Active conda environment:** `ac-solver`
 
-### BFS (`ac_solver/search/breadth_first.py`)
-- Standard breadth-first search using `collections.deque`
-- Same termination conditions as greedy
-- **Bug at line 64-66:** `word_lengths` is recomputed from `presentation` (the initial presentation) instead of from `state` (current node). This means BFS may use incorrect word lengths. Does not affect correctness of solution detection (which checks `sum(new_word_lengths) == 2`) but may affect move application.
+```bash
+conda activate ac-solver
+# OR without activating:
+conda run -n ac-solver python ...
+```
 
-### Miller-Schupp Generator (`ac_solver/search/miller_schupp/miller_schupp.py`)
-- `generate_miller_schupp_presentations(n, max_w_len)` generates all MS presentations for fixed n
-- MS(n, w) = ⟨x, y | x⁻¹ yⁿ x = yⁿ⁺¹, x = w⟩
-- Filters: w must have zero exponent sum on x; duplicates from free/cyclic reduction and cyclic permutation are removed
-- `trivialize_miller_schupp_through_search()` applies a search function to a range of (n, w) values
+| Package | Version |
+|---------|---------|
+| Python | 3.9 |
+| PyTorch | **2.0.1+cu117** |
+| Gymnasium | 0.28.1 |
+| NumPy | 1.24.3 |
+| scikit-learn | 1.3.1 |
+| wandb | 0.15.3 |
 
----
-
-## 6. Dependencies & Environment Setup
-
-| Requirement | Version in pyproject.toml | Notes |
-|-------------|--------------------------|-------|
-| Python | >=3.9, <3.12 | |
-| PyTorch | 2.0.1 | |
-| Gymnasium | 0.28.1 | |
-| NumPy | 1.24.3 | |
-| wandb | 0.15.3 | |
-| scikit-learn | 1.3.1 | Available for classifier training |
-| scipy | 1.13.1 | |
-| matplotlib | 3.7.1 | |
-| tqdm | 4.65.0 | |
-
-**Setup:** `pip install --no-deps -e .` works (pathtools build fails but isn't needed at runtime).
-
-**Tests:** 8 test files covering environment utils, AC moves, search algorithms, PPO components. Run with `pytest tests/`.
+**Verified import test (all pass):**
+```bash
+conda run -n ac-solver python -c "
+import torch; print(torch.__version__)        # 2.0.1+cu117
+from ac_solver.transformer.model import ACTransformer
+m = ACTransformer(); print(sum(p.numel() for p in set(m.parameters())))  # 25710592
+import numpy as np
+np.load('ac_solver/transformer/checkpoints/embeddings.npy')  # (1190, 512) ✓
+"
+```
 
 ---
 
-## 7. Integration Points for Proposal B
+## 6. Integration Points for Proposal B
 
-### Phase 1: Hardness Oracle H(P)
+### What Already Exists (No Implementation Needed)
 
-**No existing infrastructure** — the transformer, tokenizer, training data generator, and classifier must all be built from scratch.
-
-New files needed:
-- `ac_solver/transformer/model.py` — Decoder-only transformer architecture
-- `ac_solver/transformer/tokenizer.py` — Presentation → token sequence conversion
-- `ac_solver/transformer/data_generator.py` — Algorithm 6: random AC moves to generate 1.8M training presentations
-- `ac_solver/transformer/train.py` — Next-token prediction training
-- `ac_solver/transformer/embeddings.py` — Extract EOS embeddings for presentations
-- `ac_solver/oracle/hardness_oracle.py` — MLP classifier on top of transformer embeddings
+| Component | Status |
+|-----------|--------|
+| Transformer model code | ✓ Complete |
+| Pre-trained LM weights | ✓ Available |
+| Tokenizer | ✓ Complete |
+| Training data (1.83M pres.) | ✓ Available |
+| EOS embeddings (1190×512) | ✓ Available |
+| GS labels | ✓ Available |
+| Hardness oracle code | ✓ Complete (needs re-training) |
+| PPO full pipeline | ✓ Complete |
+| 12 AC' moves | ✓ Complete |
+| 1190 MS presentations | ✓ Available |
 
 ### Approach A — Curriculum Sampler
 
-**Primary injection point:** `ac_solver/agents/training.py:207-224`
+**Injection point:** `ac_solver/agents/training.py`, lines 207–224 (the after-Round-1 sampling block)
 
-The current sampling logic after Round 1:
+**Replace** the current `random.choice(unsolved/solved)` logic with a `CurriculumSampler` that:
+1. Pre-loads `embeddings.npy` and re-trains (or loads) the hardness oracle
+2. Assigns a difficulty score `H(P)` to each of the 1190 presentations
+3. Maintains a dynamic frontier window that expands based on training progress
+
+**Secondary point:** `environment.py` lines 75–101 — reorder `initial_states` by `H` before Round 1.
+
+**New file:** `ac_solver/agents/curriculum_sampler.py`
+
+---
+
+### Approach B — Auxiliary Reward Shaping (+ΔH)
+
+**Injection point:** Gymnasium wrapper in `make_env()`, `environment.py` lines 32–56, **after** `ACEnv` is created.
+
 ```python
-if not round1_complete:
-    curr_states[i] = max(states_processed) + 1
-else:
-    if len(success_record["solved"]) == 0 or (
-        success_record["unsolved"]
-        and random.uniform(0, 1) > args.repeat_solved_prob
-    ):
-        curr_states[i] = random.choice(list(success_record["unsolved"]))
-    else:
-        curr_states[i] = random.choice(list(success_record["solved"]))
+def thunk():
+    env = ACEnv(env_config)
+    env = HardnessRewardWrapper(env, oracle=oracle, transformer=model, alpha=args.reward_alpha)
+    if args.norm_rewards: env = NormalizeReward(env, gamma=args.gamma)
+    if args.clip_rewards: env = TransformReward(env, lambda r: np.clip(r, ...))
+    return env
 ```
 
-**Replace with:** A curriculum sampler that selects from a difficulty-sorted subset. Pre-compute `H(P)` for all 1190 presentations before training. Use a schedule to gradually expand the difficulty range.
+Wrapper adds `alpha * (H(s_t) - H(s_{t+1}))` to the reward each step.
 
-**Secondary point:** `ac_solver/agents/environment.py:75-101` — reorder `initial_states` by hardness so the Round 1 round-robin pass processes easy presentations first.
+**Key design decision:** Computing embedding per step is expensive. Options:
+- Pre-cache embeddings for seed presentations only (fast, limited)
+- Batch compute at rollout level (feasible, general)
 
-### Approach B — Auxiliary Reward Shaping
+**New file:** `ac_solver/envs/transformer_reward_wrapper.py`
 
-**Primary injection point:** `ac_solver/envs/ac_env.py:95-113` — the `step()` method.
-
-Add `reward += alpha * (H(prev_state) - H(new_state))` before returning. The oracle `H` must be loaded into the env at initialization.
-
-**Alternative (cleaner):** Compute it in the rollout loop at `ac_solver/agents/training.py:154-160` where `reward` is collected, keeping the base env pure. However, this requires access to previous/current observations to compute H.
-
-**Cleanest approach:** A Gymnasium wrapper around `ACEnv` that intercepts `step()`, computes `ΔH`, and adds the shaped reward.
+---
 
 ### Approach C — Enriched State Representation
 
-**Primary injection point:** `ac_solver/envs/ac_env.py:67-74` — the observation space definition.
+**Injection point:** Gymnasium ObservationWrapper in `make_env()`, `environment.py` lines 32–56, after `ACEnv`.
 
-Change `observation_space` from `Box(shape=(72,))` to `Box(shape=(72 + 512,))` and modify `step()`/`reset()` to append the 512-dim transformer embedding.
-
-**The PPO agent input adjusts automatically:** `ac_solver/agents/ppo_agent.py:72` — `input_dim = np.prod(envs.single_observation_space.shape)` picks up the new dimension, so the FFN input layer widens to 584 with no other code changes.
-
-**Cleanest approach:** A Gymnasium wrapper `TransformerEmbeddingWrapper(ACEnv)` that:
-1. Wraps observation space to (72 + 512,)
-2. On `reset()` and `step()`, computes the transformer embedding of the current presentation and concatenates it
-3. Leaves the base env untouched
-
-### Key Code That Must NOT Change
-- `ac_solver/envs/ac_moves.py` — The 12 AC moves are mathematically precise
-- `ac_solver/envs/utils.py` — Presentation validation and simplification
-- `ac_solver/search/` — Search algorithms (used for validation only)
-- `tests/` — All existing tests must continue to pass
-
----
-
-## 8. Paper-vs-Code Discrepancies
-
-| Paper says | Code default | CLI flag to match |
-|-----------|-------------|-------------------|
-| 28 parallel actors | `num_envs=4` | `--num-envs 28` |
-| 512 hidden units, 2 layers | `nodes_counts=[256,256]` | `--nodes-counts 512 512` |
-| Horizon T=200 | `horizon_length=2000` | `--horizon-length 200` |
-| γ=0.999 | `gamma=0.99` | `--gamma 0.999` |
-| lr=1e-4 | `lr=2.5e-4` | `--learning-rate 1e-4` |
-| λ_GAE=0.95 | `gae_lambda=0.95` | Already matches |
-| ε=0.2 | `clip_coef=0.2` | Already matches |
-| Reward: -min(10, len) / +1000 | Clip wrapper + normalization | `--clip-rewards --min-rew -10 --max-rew 1000` (default) |
-
-**To reproduce paper's constant-horizon baseline:**
-```bash
-python -m ac_solver.agents.ppo \
-  --num-envs 28 \
-  --nodes-counts 512 512 \
-  --horizon-length 200 \
-  --gamma 0.999 \
-  --learning-rate 1e-4 \
-  --num-steps 200 \
-  --total-timesteps <TBD>
+```python
+def thunk():
+    env = ACEnv(env_config)
+    env = TransformerEmbeddingWrapper(env, transformer=model, device=device)
+    ...
+    return env
 ```
 
----
+The `TransformerEmbeddingWrapper(gym.ObservationWrapper)`:
+- Widens `observation_space` from `Box(72,)` to `Box(72+512,) = Box(584,)`
+- On `reset()` and `step()`: computes transformer embedding of current state, concatenates to 72-dim obs
 
-## 9. What Must Be Built (Summary)
+**Agent auto-adapts:** `ppo_agent.py:72` reads `input_dim = np.prod(envs.single_observation_space.shape)` → FFN input widens from 72 to **584** with zero code changes to the Agent.
 
-### Must build from scratch (not in repo):
-1. **Transformer model** — 8-layer decoder-only, d_model=512, 4 heads, context 1024, tied embeddings
-2. **Tokenizer** — Map PPO's int encoding to 6-token vocabulary
-3. **Training data generator** — Algorithm 6: random AC moves on 1190 presentations → ~1.8M examples
-4. **Transformer training pipeline** — Next-token prediction with cross-entropy loss
-5. **Embedding extractor** — EOS token's final-layer hidden state
-6. **Hardness oracle** — 2-layer MLP classifier on 512-dim embeddings → solvability + difficulty
-7. **Curriculum sampler** — Difficulty-sorted sampling for Approach A
-8. **Reward shaping wrapper** — ΔH reward for Approach B
-9. **State enrichment wrapper** — Concatenate embeddings for Approach C
-10. **Variable horizon scheduler** — 200→400→800→1200 schedule (not in codebase)
-
-### Already exists and can be reused:
-- Full PPO pipeline (entry point, env, agent, training loop)
-- AC environment with 12 moves
-- Dataset of 1190 MS presentations with GS labels
-- Search algorithms for validation
-- Test infrastructure
+**New file:** `ac_solver/envs/transformer_obs_wrapper.py`
 
 ---
 
-## 10. Verification Plan
+### Files That Must NOT Change
 
-1. **Existing tests:** `pytest tests/` — all must pass unchanged
-2. **PPO baseline reproduction:** Run with paper's hyperparameters, verify ~431 solved (constant T=200)
-3. **Transformer training:** Verify loss convergence, then extract embeddings and check t-SNE clustering of GS-solved vs GS-unsolved (should match Figure 17)
-4. **Hardness oracle:** Cross-validated accuracy on 1190 presentations (target: paper's F1=0.962 from Section 8.2)
-5. **Each approach:** Compare number of presentations solved vs baseline PPO at same compute budget
+| File | Reason |
+|------|--------|
+| `ac_solver/envs/ac_moves.py` | Mathematically precise AC' moves |
+| `ac_solver/envs/utils.py` | Presentation validation |
+| `ac_solver/search/` | Reference search algorithms |
+| `tests/` | Regression test baseline |
+
+---
+
+## 7. Paper vs. Code Hyperparameter Discrepancies
+
+| Parameter | Paper | Code Default | CLI Flag |
+|-----------|-------|-------------|---------|
+| Parallel actors | 28 | `num_envs=4` | `--num-envs 28` |
+| Hidden units | 512×2 | `[256,256]` | `--nodes-counts 512 512` |
+| Horizon T | 200 | `2000` | `--horizon-length 200` |
+| γ | 0.999 | 0.99 | `--gamma 0.999` |
+| lr | 1e-4 | 2.5e-4 | `--learning-rate 1e-4` |
+| Rollout length | 200 | 2000 | `--num-steps 200` |
+| Variable horizon | 200→400→800→1200 | Not implemented | Needs custom scheduler |
+
+---
+
+## 8. Important Implementation Notes
+
+1. **The hardness oracle must be re-trained** in the current conda env before any integration. Takes ~1 minute: `conda run -n ac-solver python -m ac_solver.transformer.train_oracle`.
+
+2. **For Approach C, the observation dtype changes** from `int8` to `float32` (can't mix in one array). The `TransformerEmbeddingWrapper` should explicitly cast the PPO obs to float32 before concatenating.
+
+3. **For online embedding in Approaches B/C:** The transformer has 25.7M parameters and runs on GPU. For 28 parallel envs × 200 rollout steps = 5,600 forward passes per update, batching is essential. A practical pattern: collect all current observations, batch-forward through the transformer once, cache the results for the rollout.
+
+4. **The EOS embedding is the correct embedding choice**, as confirmed by the paper's t-SNE visualization (Figure 17) demonstrating GS-solved/unsolved clustering. The `model.get_hidden_states()` method makes this easy to extract.
+
+5. **The hardness oracle's scaler.mean_ and scaler.scale_** will need to be saved/loaded alongside the MLP weights for correct inference on new embeddings.

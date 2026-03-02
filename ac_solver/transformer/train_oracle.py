@@ -111,7 +111,8 @@ def train_fold(
         loss.backward()
         optimizer.step()
 
-        if epoch % args.log_interval == 0 or epoch == args.epochs:
+        log_interval = max(1, args.epochs // 10)
+        if epoch % log_interval == 0 or epoch == args.epochs:
             model.eval()
             with torch.no_grad():
                 val_logits = model(X_vl)
@@ -123,11 +124,10 @@ def train_fold(
                 best_preds = val_preds.copy()
                 best_state = {k: v.clone() for k, v in model.state_dict().items()}
 
-            if epoch % (args.log_interval * 5) == 0 or epoch == args.epochs:
-                print(
-                    f"  fold {fold} | epoch {epoch:4d} | loss {loss.item():.4f} | "
-                    f"val F1 {fold_f1:.4f}"
-                )
+            print(
+                f"  fold {fold} | epoch {epoch:4d} | loss {loss.item():.4f} | "
+                f"val F1 {fold_f1:.4f}"
+            )
 
     return best_preds, best_f1, best_state
 
@@ -285,12 +285,6 @@ def parse_args():
         type=int,
         default=5,
         help="Number of stratified CV folds (default: 5)",
-    )
-    parser.add_argument(
-        "--log-interval",
-        type=int,
-        default=50,
-        help="Print training stats every N epochs (default: 50)",
     )
     parser.add_argument("--seed", type=int, default=42)
     return parser.parse_args()
